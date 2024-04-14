@@ -76,7 +76,8 @@ opt_state_disc = Flux.setup(optimizer_disc, discriminator)
 opt_state_W = Flux.setup(optimizer_W, w)
 
 x_train, y_train = load_data("train")
-
+x_train = randn(Float32, 256, 256, 3, 3)
+y_train = randn(Float32, 256, 256, 3, 3)
 dataloader = DataLoader((x_train, y_train), batchsize=3, shuffle=true)
 discpool = DiscPool(dataloader)
 
@@ -91,11 +92,14 @@ function loss_discriminator(discriminator, real_A, real_B, fake_B)::Float32
     return loss_D
 end
 
-function loss_generator(disc_B, fake_B, real_B)::Tuple{Float32,Float32,Float32}
+function loss_generator(w, gen, disc_B, real_B)::Tuple{Float32,Float32,Float32}
+    Disc_B = w(disc_B)
+    noisy_A = real_A .* (1.0f0 .+ Disc_B)
+    fake_B = gen(noisy_A, Disc_B)
     loss_G_GAN = gan_loss(disc_B, true)
     loss_G_L1 = l1_loss(fake_B, real_B) * 100.0f0
     loss_G = loss_G_GAN + loss_G_L1
-    return loss_G, loss_G_GAN, loss_G_L1
+    return loss_G
 end
 
 function save_images(dir, epoch, real_A, real_B, fake_B, noisy_A)
@@ -118,12 +122,6 @@ end
 using Optimisers
 using ProgressBars
 
-Flux.params(m::UNet) = Flux.params(m.init_conv, m.time_mlp, m.downs, m.ups, m.mid_block1, m.mid_attn, m.mid_block2, m.final_res_block, m.final_conv)
-Flux.params(m::Discriminator) = Flux.params(m.model)
-Flux.params(m::WBlock) = Flux.params(m.model)
-
-disc_params = Flux.params(discriminator)
-gen_params = Flux.params(generator)
 loss_D = 0.0
 loss_G = 0.0
 loss_G_GAN = 0.0
@@ -136,7 +134,7 @@ GC.gc()
 using ForwardDiff
 using ProgressBars
 
-for epoch in 1:200
+for epoch in 1:2
     iter = ProgressBar(dataloader)
     println("epoch $epoch")
     GC.gc()
@@ -163,14 +161,12 @@ for epoch in 1:200
 
         fake_AB = cat(real_A, fake_B, dims=3)
         disc_B = discriminator(fake_AB)
-        loss_G, loss_G_GAN, loss_G_L1 = loss_generator(disc_B, fake_B, real_B)
-        loss_G, (grad_G, grad_W) = Flux.withgradient(generator, w) do gen, w
-            loss_G, loss_G_GAN, loss_G_L1 = loss_generator(disc_B, fake_B, real_B)
+        loss_G, (grad_G, grad_W) = Flux.withgradient(w, generator) do w, gen
+            loss_G, loss_G_GAN, loss_G_L1 = loss_generator(w, gen, disc_B, real_B)
             loss_G
         end
-        println("grad_G: ", grad_G)
         Flux.update!(opt_state_gen, Flux.params(generator), grad_G)
-        Flux.update!(opt_state_W, w, grad_G)
+        Flux.update!(opt_state_W, Flux.params(w), grad_G)
 
         insert!(discpool, disc_B, batchIdx)
         start_idx += 3
