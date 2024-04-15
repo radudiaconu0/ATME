@@ -91,11 +91,7 @@ function (b::Block)(x; scale_shift=Nothing)
 end
 
 struct WBlock
-<<<<<<< HEAD
     model::Chain
-=======
-    chain::Chain
->>>>>>> b1a8c51 (trying to fix shit)
 end
 Flux.@layer :expand WBlock
 
@@ -113,11 +109,7 @@ function WBlock()::WBlock
 end
 
 function (b::WBlock)(x)
-<<<<<<< HEAD
     return tanh_fast.(b.model(x))
-=======
-    return tanh_fast.(b.chain(x))
->>>>>>> b1a8c51 (trying to fix shit)
 end
 
 struct LayerNorm{T<:AbstractArray}
@@ -370,11 +362,7 @@ function UNet(dim::Int64; init_dim::Int64=Nothing, out_dim=Nothing, dim_mults=(1
     final_conv = Chain(
         ResnetBlock(dim, dim; time_emb_dim=time_dim, groups=resnet_block_groups),
         Conv((1, 1), dim => out_dim),
-<<<<<<< HEAD
         c -> CUDA.tanh.(c)
-=======
-        c -> AMDGPU.tanh.(c)
->>>>>>> b1a8c51 (trying to fix shit)
     )
     return UNet(init_conv, time_mlp, downs, ups, mid_block1, mid_attn, mid_block2, final_res_block, final_conv)
 end
