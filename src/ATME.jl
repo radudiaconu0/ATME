@@ -22,7 +22,11 @@ end
 
 using ImageCore, Images
 
+<<<<<<< HEAD
 function load_data(split::String)::Tuple{Array{Float32,4},Array{Float32,4}}
+=======
+function load_data(split)
+>>>>>>> b1a8c51 (trying to fix shit)
     dir = split
     dir = joinpath(@__DIR__, dir)
     dirs = readdir(dir)
@@ -69,6 +73,7 @@ w = WBlock() |> gpu
 
 optimizer_gen = Flux.Adam(0.0002, (0.5, 0.999))
 optimizer_disc = Flux.Adam(0.0002, (0.5, 0.999))
+<<<<<<< HEAD
 optimizer_W = Flux.Adam(0.0002, (0.5, 0.999))
 
 opt_state_gen = Flux.setup(optimizer_gen, generator)
@@ -112,6 +117,29 @@ function save_images(dir, epoch, real_A, real_B, fake_B, noisy_A)
     Images.save(joinpath(dir, "img_epoch_$(epoch)_realB.png"), img)
 
     img = sigmoid.(cpu(real_A[:, :, :, 2]))
+=======
+gen_state = Flux.setup(optimizer_gen, (w, generator))
+disc_state = Flux.setup(optimizer_disc, discriminator)
+
+
+x_train, y_train = AMDGPU.rand(Float32, 256, 256, 3, 405), AMDGPU.rand(Float32, 256, 256, 3, 405)
+
+dataloader = DataLoader((x_train, y_train), batchsize=3, shuffle=true)
+discpool = DiscPool(dataloader)
+
+
+function save_images(dir, epoch, real_A, real_B, fake_B, noisy_A)
+    img = sigmoid.(cpu(fake_B[:, :, :, 1]))
+    img = colorview(RGB, permutedims(img, (3, 2, 1)))
+    print(" size", size(img))
+    Images.save(joinpath(dir, "img_epoch_$(epoch)_fakeB.png"), img)
+
+    img = sigmoid.(cpu(real_B[:, :, :, 1]))
+    img = colorview(RGB, permutedims(img, (3, 2, 1)))
+    Images.save(joinpath(dir, "img_epoch_$(epoch)_realB.png"), img)
+
+    img = sigmoid.(cpu(real_A[:, :, :, 1]))
+>>>>>>> b1a8c51 (trying to fix shit)
     img = colorview(RGB, permutedims(img, (3, 2, 1)))
     Images.save(joinpath(dir, "img_epoch_$(epoch)_realA.png"), img)
 
@@ -119,6 +147,7 @@ function save_images(dir, epoch, real_A, real_B, fake_B, noisy_A)
     img = colorview(RGB, permutedims(img, (3, 2, 1)))
     Images.save(joinpath(dir, "img_epoch_$(epoch)_noisyA.png"), img)
 end
+<<<<<<< HEAD
 using Optimisers
 using ProgressBars
 
@@ -135,6 +164,13 @@ using ForwardDiff
 using ProgressBars
 
 for epoch in 1:2
+=======
+
+AMDGPU.HIP.reclaim()
+GC.gc()
+using ProgressBars
+for epoch in 1:20
+>>>>>>> b1a8c51 (trying to fix shit)
     iter = ProgressBar(dataloader)
     println("epoch $epoch")
     GC.gc()
@@ -145,18 +181,36 @@ for epoch in 1:2
         disc_B = query(discpool, start_idx:start_idx+2)
         real_A = x |> gpu
         real_B = y |> gpu
+<<<<<<< HEAD
         Disc_B = w(disc_B)
         noisy_A = real_A .* (1.0f0 .+ Disc_B)
         fake_B = generator(noisy_A, Disc_B)
         batchIdx = LinRange{Int64}(start_idx, start_idx + 2, 3)
 
         disc_B = query(discpool, batchIdx)
+=======
+        println("disc_B:", size(disc_B))
+        Disc_B = w(disc_B)
+        println("Disc_B:", size(Disc_B))
+
+        noisy_A = real_A .* (1.0f0 .+ Disc_B)
+        println("noisy_A:", size(noisy_A))
+        fake_B = generator(noisy_A, Disc_B)
 
         loss_D, grads_D = Flux.withgradient(discriminator) do disc
             loss_D = loss_discriminator(disc, real_A, real_B, fake_B)
             loss_D
         end
 
+        Optimisers.update!(opt_state_disc, discriminator, grads_D[1])
+>>>>>>> b1a8c51 (trying to fix shit)
+
+        loss_D, grads_D = Flux.withgradient(discriminator) do disc
+            loss_D = loss_discriminator(disc, real_A, real_B, fake_B)
+            loss_D
+        end
+
+<<<<<<< HEAD
         Flux.update!(opt_state_disc, Flux.params(discriminator), grads_D)
 
         fake_AB = cat(real_A, fake_B, dims=3)
@@ -167,6 +221,14 @@ for epoch in 1:2
         end
         Flux.update!(opt_state_gen, Flux.params(generator), grad_G)
         Flux.update!(opt_state_W, Flux.params(w), grad_G)
+=======
+        loss_G, grads_G = Flux.withgradient(w, generator) do w, gen
+            loss_G, loss_G_GAN, loss_G_L1, disc_B = loss_generator(w, gen, disc_B, real_A, real_B)
+            loss_G
+        end
+        Optimisers.update!(opt_state_gen, (w, generator), grads_G)
+
+>>>>>>> b1a8c51 (trying to fix shit)
 
         insert!(discpool, disc_B, batchIdx)
         start_idx += 3
@@ -177,7 +239,10 @@ for epoch in 1:2
         set_multiline_postfix(iter, "loss_D:$(loss_D)\nloss_G:$(loss_G), loss_G_GAN:$(loss_G_GAN), loss_G_L1:$(loss_G_L1)")
     end
     GC.gc()
+<<<<<<< HEAD
     break
+=======
+>>>>>>> b1a8c51 (trying to fix shit)
 end
 
 end # module ATME
