@@ -67,12 +67,11 @@ generator = UNet(64; init_dim=64, out_dim=3, dim_mults=(1, 2, 4, 8), channels=3,
 discriminator = Discriminator(6; ndf=64, n_layers=3, norm_layer=BatchNorm) |> gpu
 w = WBlock() |> gpu
 
-optimizer_gen = Optimisers.Adam(0.0002, (0.5, 0.999))
-optimizer_disc = Optimisers.Adam(0.0002, (0.5, 0.999))
+optimizer_gen = Flux.Adam(0.0002, (0.5, 0.999))
+optimizer_disc = Flux.Adam(0.0002, (0.5, 0.999))
 
-opt_state_gen = Optimisers.setup(optimizer_gen, (w, generator))
-opt_state_disc = Optimisers.setup(optimizer_disc, discriminator)
-# x_train, y_train = load_data("train")
+
+x_train, y_train = load_data("train")
 x_train, y_train = CUDA.rand(Float32, 256, 256, 3, 405), CUDA.rand(Float32, 256, 256, 3, 405)
 
 dataloader = DataLoader((x_train, y_train), batchsize=3, shuffle=true)
@@ -95,12 +94,8 @@ function loss_generator(w, gen, discriminator, disc_B, real_A, real_B)
     noisy_A = real_A .* (1.0f0 .+ Disc_B)
     fake_B = gen(noisy_A, Disc_B)
 
-    fake_AB = cat(real_A, fake_B, dims=3)
-    disc_B = discriminator(fake_AB)
-    loss_G_GAN = gan_loss(disc_B, true)
-    loss_G_L1 = l1_loss(fake_B, real_B) * 100.0f0
-    loss_G = loss_G_GAN + loss_G_L1
-    return (loss_G, loss_G_GAN, loss_G_L1, disc_B)
+
+    return loss_G
 end
 
 function save_images(dir, epoch, real_A, real_B, fake_B, noisy_A)
@@ -129,28 +124,49 @@ loss_G_GAN = 0.0
 loss_G_L1 = 0.0
 GC.gc()
 
-function train_discriminator!(discriminator, w, generator, real_A, real_B, disc_B)
-    Disc_B = w(disc_B)
-    noisy_A = real_A .* (1.0f0 .+ Disc_B)
-    fake_B = generator(noisy_A, Disc_B)
+using Zygote
 
-    loss_D, grads_D = Flux.withgradient(discriminator) do disc
-        loss_D = loss_discriminator(disc, real_A, real_B, fake_B)
-        loss_D
+function train_discriminator!(discriminator, real_A, real_B, fake_B)
+    # Disc_B = w(disc_B)
+    # noisy_A = real_A .* (1.0f0 .+ Disc_B)
+    # fake_B = generator(noisy_A, Disc_B)
+    params = Flux.params(discriminator)
+    loss_D, grads_D = Zygote.pullback(params) do
+        fake_AB = cat(real_A, fake_B, dims=3)
+        pred_fake = discriminator(fake_AB)
+        loss_D_fake = gan_loss(pred_fake, false)
+        real_AB = cat(real_A, real_B, dims=3)
+        pred_real = discriminator(real_AB)
+        loss_D_real = gan_loss(pred_real, true)
+        loss_D = (loss_D_fake + loss_D_real) * 0.5f0
+        return loss_D
     end
-
-    Optimisers.update!(opt_state_disc, discriminator, grads_D[1])
+    grads = grads_D(1.0)
+    Flux.update!(optimizer_disc, Flux.params(discriminator), grads)
     return loss_D
 end
 
 function train_generator!(w, generator, discriminator, real_A, real_B, disc_B)
+    loss_G, grads_G = Flux.withgradient(() -> loss_generator(w, generator, discriminator, disc_B, real_A, real_B), Flux.params(w, generator))
+    Flux.update!(optimizer_gen, Flux.params(w, generator), grads_G)
+    return loss_G
+end
 
-    loss_G, grads_G = Flux.withgradient(w, generator) do W, Gen
-        loss_G, loss_G_GAN, loss_G_L1, disc_B = loss_generator(W, Gen, discriminator, disc_B, real_A, real_B)
-        loss_G
+function train_GAN(w, generator, discriminator, real_A, real_B, disc_B)
+    losses, grads = Zygote.pullback(Flux.params(w, generator)) do
+        Disc_B = w(disc_B)
+        noisy_A = real_A .* (1.0f0 .+ Disc_B)
+        fake_B = generator(noisy_A, Disc_B)
+        loss_D = train_discriminator!(discriminator, real_A, real_B, fake_B)
+        fake_AB = cat(real_A, fake_B, dims=3)
+        disc_B = discriminator(fake_AB)
+        loss_G_GAN = gan_loss(disc_B, true)
+        loss_G_L1 = l1_loss(fake_B, real_B) * 100.0f0
+        loss_G = loss_G_GAN + loss_G_L1
+        return loss_G, loss_D
     end
-    Optimisers.update!(opt_state_gen, (w, generator), grads_G)
-    return loss_G, loss_G_GAN, loss_G_L1, disc_B
+    Flux.update!(optimizer_gen, Flux.params(w, generator), grads)
+    return losses
 end
 
 using ProgressBars
@@ -168,19 +184,14 @@ for epoch in 1:20
         disc_B = query(discpool, batchIdx)
         real_A = x |> gpu
         real_B = y |> gpu
-
-        loss_D = train_discriminator!(discriminator, w, generator, real_A, real_B, disc_B)
-
-
-        loss_G, loss_G_GAN, loss_G_L1, disc_B = train_generator!(w, generator, discriminator, real_A, real_B, disc_B)
-
+        loss = train_GAN(w, generator, discriminator, real_A, real_B, disc_B)
         insert!(discpool, disc_B, batchIdx)
         start_idx += 3
-
-        GC.gc()
-        set_multiline_postfix(iter, "loss_D:$(loss_D)\nloss_G:$(loss_G), loss_G_GAN:$(loss_G_GAN), loss_G_L1:$(loss_G_L1)")
+        loss_G, loss_D = loss
+        set_multiline_postfix(iter, "loss_D:$(loss_D)\nloss_G:$(loss_G)")
     end
     GC.gc()
+    CUDA.reclaim()
 end
 
 end # module ATME
