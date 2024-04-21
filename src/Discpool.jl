@@ -14,8 +14,7 @@ struct DiscPool
 end
 
 function DiscPool(dataloader; isTrain=true, disc_out_size=30)
-    dataset_len = size(dataloader.data[1], 4)
-    println("DiscPool: dataset_len = $dataset_len")
+    dataset_len = 405
 
     if isTrain
         # Initially, the discriminator doesn't know real/fake because is not trained yet.

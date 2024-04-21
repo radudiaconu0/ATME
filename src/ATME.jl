@@ -49,7 +49,6 @@ function load_data(split::String)::Tuple{Array{Float32,4},Array{Float32,4}}
             push!(x, b)
             push!(y, s)
         end
-        GC.gc()
     end
     x = cat(x..., dims=4)
     y = cat(y..., dims=4)
@@ -66,132 +65,100 @@ using Optimisers
 generator = UNet(64; init_dim=64, out_dim=3, dim_mults=(1, 2, 4, 8), channels=3, self_condition=false, resnet_block_groups=8, learned_variance=false, learned_sinusoidal_cond=false, random_fourier_features=false, learned_sunusoidal_dim=616, time_dim_mult=4) |> gpu
 discriminator = Discriminator(6; ndf=64, n_layers=3, norm_layer=BatchNorm) |> gpu
 w = WBlock() |> gpu
+CUDA.reclaim()
 
 optimizer_gen = Flux.Adam(0.0002, (0.5, 0.999))
 optimizer_disc = Flux.Adam(0.0002, (0.5, 0.999))
 
+opt_state_disc = Flux.setup(optimizer_disc, discriminator)
+opt_state_gen = Flux.setup(optimizer_gen, (w, generator))
+
 
 x_train, y_train = load_data("train")
-x_train, y_train = CUDA.rand(Float32, 256, 256, 3, 405), CUDA.rand(Float32, 256, 256, 3, 405)
+# x_train, y_train = CUDA.rand(Float32, 256, 256, 3, 405), CUDA.rand(Float32, 256, 256, 3, 405)
 
-dataloader = DataLoader((x_train, y_train), batchsize=3, shuffle=true)
+dataloader = DataLoader((x_train, y_train), batchsize=3)
 discpool = DiscPool(dataloader)
 
-function loss_discriminator(discriminator, real_A, real_B, fake_B)::Float32
-    fake_AB = cat(real_A, fake_B, dims=3)
-    pred_fake = discriminator(fake_AB)
-    loss_D_fake = gan_loss(pred_fake, false)
-    real_AB = cat(real_A, real_B, dims=3)
-    pred_real = discriminator(real_AB)
-    loss_D_real = gan_loss(pred_real, true)
-    loss_D = (loss_D_fake + loss_D_real) * 0.5f0
-    return loss_D
-end
-
-function loss_generator(w, gen, discriminator, disc_B, real_A, real_B)
-    Disc_B = w(disc_B)
-
-    noisy_A = real_A .* (1.0f0 .+ Disc_B)
-    fake_B = gen(noisy_A, Disc_B)
-
-
-    return loss_G
-end
-
-function save_images(dir, epoch, real_A, real_B, fake_B, noisy_A)
-    img = sigmoid.(cpu(fake_B[:, :, :, 2]))
-    img = colorview(RGB, permutedims(img, (3, 2, 1)))
-    Images.save(joinpath(dir, "img_epoch_$(epoch)_fakeB.png"), img)
-
-    img = sigmoid.(cpu(real_B[:, :, :, 2]))
-    img = colorview(RGB, permutedims(img, (3, 2, 1)))
-    Images.save(joinpath(dir, "img_epoch_$(epoch)_realB.png"), img)
-
-    img = sigmoid.(cpu(real_A[:, :, :, 2]))
-    img = colorview(RGB, permutedims(img, (3, 2, 1)))
-    Images.save(joinpath(dir, "img_epoch_$(epoch)_realA.png"), img)
-
-    img = sigmoid.(cpu(noisy_A[:, :, :, 1]))
-    img = colorview(RGB, permutedims(img, (3, 2, 1)))
-    Images.save(joinpath(dir, "img_epoch_$(epoch)_noisyA.png"), img)
-end
-using Optimisers
-using ProgressBars
-
-loss_D = 0.0
-loss_G = 0.0
-loss_G_GAN = 0.0
-loss_G_L1 = 0.0
-GC.gc()
+losses_D::Vector{Float32} = []
+losses_G::Vector{Float32} = []
 
 using Zygote
-
-function train_discriminator!(discriminator, real_A, real_B, fake_B)
-    # Disc_B = w(disc_B)
-    # noisy_A = real_A .* (1.0f0 .+ Disc_B)
-    # fake_B = generator(noisy_A, Disc_B)
-    params = Flux.params(discriminator)
-    loss_D, grads_D = Zygote.pullback(params) do
-        fake_AB = cat(real_A, fake_B, dims=3)
-        pred_fake = discriminator(fake_AB)
-        loss_D_fake = gan_loss(pred_fake, false)
-        real_AB = cat(real_A, real_B, dims=3)
-        pred_real = discriminator(real_AB)
-        loss_D_real = gan_loss(pred_real, true)
-        loss_D = (loss_D_fake + loss_D_real) * 0.5f0
-        return loss_D
-    end
-    grads = grads_D(1.0)
-    Flux.update!(optimizer_disc, Flux.params(discriminator), grads)
-    return loss_D
-end
-
-function train_generator!(w, generator, discriminator, real_A, real_B, disc_B)
-    loss_G, grads_G = Flux.withgradient(() -> loss_generator(w, generator, discriminator, disc_B, real_A, real_B), Flux.params(w, generator))
-    Flux.update!(optimizer_gen, Flux.params(w, generator), grads_G)
-    return loss_G
-end
-
 function train_GAN(w, generator, discriminator, real_A, real_B, disc_B)
-    losses, grads = Zygote.pullback(Flux.params(w, generator)) do
-        Disc_B = w(disc_B)
+    (loss_G, fake_B, noisy_A), (grads_W, grads_G) = Flux.withgradient(w, generator) do W, G
+        Disc_B = W(disc_B)
         noisy_A = real_A .* (1.0f0 .+ Disc_B)
-        fake_B = generator(noisy_A, Disc_B)
-        loss_D = train_discriminator!(discriminator, real_A, real_B, fake_B)
+        fake_B = G(noisy_A, Disc_B)
         fake_AB = cat(real_A, fake_B, dims=3)
+        ignore() do
+            loss_D, grads_D = Flux.withgradient(discriminator) do D
+                pred_fake = D(fake_AB)
+                loss_D_fake = gan_loss(pred_fake, false)
+                real_AB = cat(real_A, real_B, dims=3)
+                pred_real = D(real_AB)
+                loss_D_real = gan_loss(pred_real, true)
+                loss_D = (loss_D_fake + loss_D_real) * 0.5f0
+                return loss_D
+            end
+            push!(losses_D, loss_D)
+            Flux.update!(opt_state_disc, discriminator, grads_D[1])
+        end
         disc_B = discriminator(fake_AB)
         loss_G_GAN = gan_loss(disc_B, true)
         loss_G_L1 = l1_loss(fake_B, real_B) * 100.0f0
         loss_G = loss_G_GAN + loss_G_L1
-        return loss_G, loss_D
+        return loss_G, fake_B, noisy_A
     end
-    Flux.update!(optimizer_gen, Flux.params(w, generator), grads)
-    return losses
+    Flux.update!(opt_state_gen, (w, generator), (grads_W, grads_G))
+    push!(losses_G, loss_G)
+    return disc_B, fake_B, noisy_A, losses_D[end], losses_G[end]
+end
+
+
+
+
+function save_images(dir, epoch, real_A, real_B, fake_B, noisy_A, index)
+    img = sigmoid.(cpu(fake_B[:, :, :, 2]))
+    img = colorview(RGB, permutedims(img, (3, 2, 1)))
+    Images.save(joinpath(dir, "img_epoch_$(epoch)_$(index)_fakeB.png"), img)
+
+    img = sigmoid.(cpu(real_B[:, :, :, 2]))
+    img = colorview(RGB, permutedims(img, (3, 2, 1)))
+    Images.save(joinpath(dir, "img_epoch_$(epoch)_$(index)_realB.png"), img)
+
+    img = sigmoid.(cpu(real_A[:, :, :, 2]))
+    img = colorview(RGB, permutedims(img, (3, 2, 1)))
+    Images.save(joinpath(dir, "img_epoch_$(epoch)_$(index)_realA.png"), img)
+
+    img = sigmoid.(cpu(noisy_A[:, :, :, 2]))
+    img = colorview(RGB, permutedims(img, (3, 2, 1)))
+    Images.save(joinpath(dir, "img_epoch_$(epoch)_$(index)_noisyA.png"), img)
 end
 
 using ProgressBars
 
-query(discpool, 1:3)
-for epoch in 1:20
+for epoch in 1:100
     iter = ProgressBar(dataloader)
     println("epoch $epoch")
-    GC.gc()
     start_idx = 1
     index = 0
-    for (x, y) in iter
-        index += 1
-        batchIdx = LinRange{Int64}(start_idx, start_idx + 2, 3)
-        disc_B = query(discpool, batchIdx)
-        real_A = x |> gpu
-        real_B = y |> gpu
-        loss = train_GAN(w, generator, discriminator, real_A, real_B, disc_B)
-        insert!(discpool, disc_B, batchIdx)
-        start_idx += 3
-        loss_G, loss_D = loss
-        set_multiline_postfix(iter, "loss_D:$(loss_D)\nloss_G:$(loss_G)")
-    end
     GC.gc()
     CUDA.reclaim()
+    for (x, y) in iter
+        index += 3
+        real_A = gpu(x)
+        real_B = gpu(y)
+        batchIdx = LinRange{Int64}(start_idx, start_idx + 2, 3)
+        disc_B = query(discpool, batchIdx)
+        disc_B, fake_B, noisy_A, loss_D, loss_G = train_GAN(w, generator, discriminator, real_A, real_B, disc_B)
+        insert!(discpool, disc_B, batchIdx)
+        start_idx += 3
+        if index % 135 == 0
+            save_images("images", epoch, real_A, real_B, fake_B, noisy_A, index)
+        end
+        set_multiline_postfix(iter, "loss_D: $(loss_D)\nloss_G: $(loss_G)")
+        GC.gc()
+    end
 end
 
 end # module ATME

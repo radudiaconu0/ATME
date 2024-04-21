@@ -3,6 +3,7 @@ using Flux, CUDA, cuDNN
 using Flux: SkipConnection
 using Statistics: mean, var
 using OMEinsum
+using NNlib
 
 struct SinusoidalPosEmb
     dim::Int64
@@ -183,7 +184,7 @@ function WBlock()::WBlock
 end
 
 function (b::WBlock)(x)
-    return tanh_fast.(b.model(x))
+    return tanh.(b.model(x))
 end
 
 struct LayerNorm{T<:AbstractArray}
@@ -386,10 +387,6 @@ function UNet(dim::Int64; init_dim::Int64=Nothing, out_dim=Nothing, dim_mults=(1
         gelu,
         Dense(time_dim => time_dim),
     )
-    for (dim_in, dim_out) in in_out
-        println("dim_in: ", dim_in)
-        println("dim_out: ", dim_out)
-    end
     downs = [
         begin
             dim_in_out
@@ -441,7 +438,7 @@ function UNet(dim::Int64; init_dim::Int64=Nothing, out_dim=Nothing, dim_mults=(1
     final_conv = Chain(
         ResnetBlock(dim, dim; time_emb_dim=time_dim, groups=resnet_block_groups),
         Conv((1, 1), dim => out_dim),
-        c -> CUDA.tanh.(c)
+        c -> tanh.(c)
     )
     return UNet(init_conv, time_mlp, downs, ups, mid_block1, mid_attn, mid_block2, final_res_block, final_conv)
 end
@@ -463,38 +460,70 @@ function (u::UNet)(x, time; x_self_cond=Nothing)
     time = mean(time; dims=(1, 2, 3))
     time = reshape(time, (size(time, 4), 1))
     t = u.time_mlp(time)
-    h = [
-        begin
-            x = block1(x; time_emb=t)
-            x1 = identity(x)
-            x = block2(x; time_emb=t)
-            x = att(x)
-            x2 = identity(x)
-            x = downsample(x)
-            (x1, x2)  # Return a tuple to be collected
-        end
-        for (block1, block2, att, downsample) in u.downs
-    ]
+    x = u.downs[1][1](x; time_emb=t)
+    a = identity(x)
+    x = u.downs[1][2](x; time_emb=t)
+    x = u.downs[1][3](x)
+    b = identity(x)
+    x = u.downs[1][4](x)
+
+    x = u.downs[2][1](x; time_emb=t)
+    c = identity(x)
+    x = u.downs[2][2](x; time_emb=t)
+    x = u.downs[2][3](x)
+    d = identity(x)
+    x = u.downs[2][4](x)
+
+    x = u.downs[3][1](x; time_emb=t)
+    e = identity(x)
+    x = u.downs[3][2](x; time_emb=t)
+    x = u.downs[3][3](x)
+    f = identity(x)
+    x = u.downs[3][4](x)
+
+    x = u.downs[4][1](x; time_emb=t)
+    g = identity(x)
+    x = u.downs[4][2](x; time_emb=t)
+    x = u.downs[4][3](x)
+    h = identity(x)
+    x = u.downs[4][4](x)
 
     x = u.mid_block1(x; time_emb=t)
     x = u.mid_attn(x)
     x = u.mid_block2(x; time_emb=t)
-    index = length(h)
-    for (block1, block2, att, upsample) in u.ups
-        x = cat(x, h[index][2], dims=3)
-        x = block1(x; time_emb=t)
-        x = cat(x, h[index][1], dims=3)
-        x = block2(x; time_emb=t)
-        x = att(x)
-        x = upsample(x)
-        index -= 1
-    end
+
+    x = cat(x, h, dims=3)
+    x = u.ups[1][1](x; time_emb=t)
+    x = cat(x, g, dims=3)
+    x = u.ups[1][2](x; time_emb=t)
+    x = u.ups[1][3](x)
+    x = u.ups[1][4](x)
+
+    x = cat(x, f, dims=3)
+    x = u.ups[2][1](x; time_emb=t)
+    x = cat(x, e, dims=3)
+    x = u.ups[2][2](x; time_emb=t)
+    x = u.ups[2][3](x)
+    x = u.ups[2][4](x)
+
+    x = cat(x, d, dims=3)
+    x = u.ups[3][1](x; time_emb=t)
+    x = cat(x, c, dims=3)
+    x = u.ups[3][2](x; time_emb=t)
+    x = u.ups[3][3](x)
+    x = u.ups[3][4](x)
+
+    x = cat(x, b, dims=3)
+    x = u.ups[4][1](x; time_emb=t)
+    x = cat(x, a, dims=3)
+    x = u.ups[4][2](x; time_emb=t)
+    x = u.ups[4][3](x)
+    x = u.ups[4][4](x)
 
     x = cat(x, r, dims=3)
     x = u.final_res_block(x; time_emb=t)
     x = u.final_conv(x)
     return x
 end
-
 
 end
