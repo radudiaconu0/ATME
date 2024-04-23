@@ -22,7 +22,7 @@ function (emb::SinusoidalPosEmb)(x)
     emb = exp.(range(0, half_dim - 1) * -emb)
     emb = reshape(emb, (1, size(emb, 1))) |> gpu
     x = reshape(x, (size(x, 1), 1))
-    emb = x * emb
+    emb = x .* emb
     emb = cat(sin.(emb), cos.(emb), dims=2)
     emb = reshape(emb, (size(emb, 2), size(emb, 1)))
     return emb
@@ -64,11 +64,11 @@ end
 
 Flux.@layer :expand DownSample
 
-function (d::DownSample)(x)
+function (d::DownSample)(x::AbstractArray)
     return d.chain(x)
 end
 
-function Rearrange(x)
+function Rearrange(x::AbstractArray)
     dim1::Int64 = size(x, 1) // 2
     dim2::Int64 = size(x, 2) // 2
     dim3::Int64 = size(x, 3) * 4
@@ -95,7 +95,7 @@ end
 
 Flux.@layer :expand Attention
 
-function (la::Attention)(x)
+function (la::Attention)(x::AbstractArray)::AbstractArray
     h, w, c, b = size(x)
     qkv = Flux.chunk(la.to_qkv(x), 3; dims=3)
     q, k, v = qkv
@@ -106,6 +106,7 @@ function (la::Attention)(x)
     dim4 = size(q, 4)
 
     dim::Int64 = dim3 // la.heads
+
     q = reshape(q, dim, dim1 * dim2, la.heads, dim4)
 
     k = reshape(k, dim, dim1 * dim2, la.heads, dim4)
@@ -130,7 +131,7 @@ end
 
 Flux.@layer :expand WeightStandardizedConv2d
 
-function (w::WeightStandardizedConv2d)(x)
+function (w::WeightStandardizedConv2d)(x::AbstractArray)::AbstractArray
     w_old = w.layer.weight
     w_new = Flux.normalise(w_old; dims=ntuple(identity, ndims(w_old) - 1))
     lay_new = Conv(w_new, w.layer.bias, w.layer.σ; w.layer.stride, w.layer.pad, w.layer.dilation, w.layer.groups)
@@ -211,7 +212,7 @@ struct ResnetBlock
     mlp::Chain
     block1::Block
     block2::Block
-    res_conv
+    res_conv::Tuple{Conv,typeof(identity)}
 end
 function ResnetBlock(in_channels, out_channels; time_emb_dim=Nothing, groups=8)
     if time_emb_dim != Nothing
@@ -234,7 +235,7 @@ end
 
 Flux.@layer :expand ResnetBlock
 
-function (r::ResnetBlock)(x; time_emb=Nothing)
+function (r::ResnetBlock)(x::AbstractArray; time_emb=Nothing)
     scale_shift = Nothing
     if r.mlp != Chain() && time_emb != Nothing
         time_emb = r.mlp(time_emb)
@@ -280,7 +281,7 @@ function PreNorm(dim::Int, fn)
 end
 Flux.@layer :expand PreNorm
 
-function (pn::PreNorm)(x)
+function (pn::PreNorm)(x::AbstractArray)
     x = pn.norm(x)
     return pn.fn(x)
 end
@@ -307,7 +308,7 @@ end
 
 Flux.@layer :expand LinearAttention
 
-function (la::LinearAttention)(x)
+function (la::LinearAttention)(x::AbstractArray)
     h, w, c, b = size(x)
     qkv = Flux.chunk(la.to_qkv(x), 3; dims=3)
     q, k, v = qkv
@@ -350,12 +351,18 @@ struct UNet
     mid_block2::ResnetBlock
     final_res_block::ResnetBlock
     final_conv::Chain
+    self_condition::Bool
 end
+
 function default(val, d)
     if val != Nothing
         return val
     else
-        return d
+        if d isa Function
+            return d()
+        else
+            return d
+        end
     end
 end
 
@@ -440,7 +447,7 @@ function UNet(dim::Int64; init_dim::Int64=Nothing, out_dim=Nothing, dim_mults=(1
         Conv((1, 1), dim => out_dim),
         c -> tanh.(c)
     )
-    return UNet(init_conv, time_mlp, downs, ups, mid_block1, mid_attn, mid_block2, final_res_block, final_conv)
+    return UNet(init_conv, time_mlp, downs, ups, mid_block1, mid_attn, mid_block2, final_res_block, final_conv, self_condition)
 end
 
 using Flux
@@ -448,13 +455,13 @@ using Flux
 
 Flux.@layer :expand UNet
 
-function (u::UNet)(x, time; x_self_cond=Nothing)
-    # if u.self_condition
-    #     if x_self_cond == Nothing
-    #         x_self_cond = zeros(Float32, size(x, 1), size(x, 2), 1, size(x, 4))
-    #     end
-    #     x = cat(x, x_self_cond, dims=3)
-    # end
+function (u::UNet)(x::AbstractArray, time::AbstractArray; x_self_cond::AbstractArray=Nothing)::AbstractArray
+    if u.self_condition
+        if x_self_cond == Nothing
+            x_self_cond = zeros(Float32, size(x, 1), size(x, 2), 1, size(x, 4))
+        end
+        x = cat(x, x_self_cond, dims=3)
+    end
     x = u.init_conv(x)
     r = identity(x)
     time = mean(time; dims=(1, 2, 3))

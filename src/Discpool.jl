@@ -10,7 +10,7 @@ import Base: getindex, length
 struct DiscPool
     dataloader::DataLoader
     dataset_len::Int
-    disc_out
+    disc_out::AbstractArray
 end
 
 function DiscPool(dataloader; isTrain=true, disc_out_size=30)
@@ -33,7 +33,7 @@ Base.getindex(dp::DiscPool, idx) = throw(NotImplementedError("DiscPool does not 
 
 Base.length(dp::DiscPool) = dp.dataset_len
 
-function query(dp::DiscPool, img_idx)
+function query(dp::DiscPool, img_idx)::AbstractArray
     # Return the last discriminator map from the pool, corresponding to given image indices.
     return dp.disc_out[:, :, :, img_idx]
 end
